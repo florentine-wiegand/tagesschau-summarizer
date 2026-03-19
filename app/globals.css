@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+.prose h2 {
+  @apply text-xl font-semibold mb-4 text-white mt-8;
+}
+
+.prose p {
+  @apply mb-4 text-gray-300 leading-relaxed;
+}
+
+.prose ul {
+  @apply list-disc pl-6 mb-4 text-gray-300 space-y-2;
+}
+
+.prose strong {
+  @apply font-semibold text-white;
+}
