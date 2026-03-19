@@ -36,8 +36,6 @@ def main():
             
             for item in items:
                 title = (item.get('title', '') or '').lower()
-                # 1. Priorität: 20 Uhr Sendung
-                # 2. Priorität (Fallback): Irgendeine Tagesschau-Sendung von heute
                 if 'tagesschau' in title:
                     video_info = item.get('video') or item
                     streams = video_info.get('streams', {})
@@ -46,21 +44,18 @@ def main():
                         video_title = item.get('title')
                         video_id = item.get('externalId') or item.get('sophoraId') or f'ts_{int(time.time())}'
                         
-                        # Wenn es die 20 Uhr ist, nehmen wir sie sofort.
-                        # Wenn es eine andere ist, speichern wir sie als Ersatz-Option.
                         if '20:00' in title or '20 uhr' in title:
                             print(f'Volltreffer: {video_title}')
                             break
                         else:
                             print(f'Ersatz-Option gefunden: {video_title}')
-                            # Wir suchen trotzdem noch kurz weiter nach der 20:00er...
             
             if video_url: break
         except Exception as e:
             print(f'Fehler bei {url}: {e}')
 
     if not video_url:
-        print('Unglaublich: Selbst im tiefen Archiv ist nichts zu finden. Wir warten auf 20 Uhr heute Abend!')
+        print('Keine Sendung gefunden. Wir probieren es später wieder!')
         return
 
     print(f'Verarbeite jetzt: {video_title}')
@@ -80,7 +75,9 @@ def main():
     print('Gemini arbeitet (1-2 Min)...')
     try:
         client = genai.Client(api_key=gemini_api_key)
-        gfile = client.files.upload(file=video_file)
+        # Korrektur hier: path= statt file=
+        gfile = client.files.upload(path=video_file)
+        
         while gfile.state.name == 'PROCESSING':
             time.sleep(5)
             gfile = client.files.get(name=gfile.name)
@@ -90,7 +87,8 @@ def main():
         
         # 4. Speichern
         date_str = datetime.now().strftime('%Y-%m-%d')
-        frontmatter = f'---\ntitle: \"{video_title}\"\ndate: \"{date_str}\"\nvideoId: \"{video_id}\"\n---\n\n'
+        # Metadaten für das System
+        frontmatter = '---\ntitle: \"' + video_title + '\"\ndate: \"' + date_str + '\"\nvideoId: \"' + video_id + '\"\n---\n\n'
         with open(md_filename, 'w', encoding='utf-8') as f:
             f.write(frontmatter + response.text)
         print('DATEI GESPEICHERT!')
