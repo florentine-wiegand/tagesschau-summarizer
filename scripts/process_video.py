@@ -10,8 +10,8 @@ import sys
 
 # Wir suchen tief in der Datenbank
 API_URLS = [
-    'https://www.tagesschau.de/api2u/news/?pageSize=100&searchText=20:00',
-    'https://www.tagesschau.de/api2u/news/?pageSize=100&searchText=tagesschau',
+    'https://www.tagesschau.de/api2u/news/?pageSize=50&searchText=20:00',
+    'https://www.tagesschau.de/api2u/news/?pageSize=50&searchText=tagesschau',
     'https://www.tagesschau.de/api2u/homepage/'
 ]
 CONTENT_DIR = 'content/summaries'
@@ -71,27 +71,25 @@ def main():
         upload_resp = client.files.upload(path=video_file)
         gfile_name = upload_resp if isinstance(upload_resp, str) else upload_resp.name
         
-        # WARTEN - Jetzt robust gegen Text/Objekt
+        # Warten auf Verarbeitung
         while True:
             file_info = client.files.get(name=gfile_name)
-            # Wir machen den Status zu Text und wandeln ihn in GROSSBUCHSTABEN um
             status = str(file_info.state).upper()
-            
             if 'ACTIVE' in status:
                 break
             elif 'FAILED' in status:
-                print('KI-Verarbeitung fehlgeschlagen.')
                 sys.exit(1)
             else:
                 print(f'KI analysiert noch (Status: {status})...')
-                time.sleep(10)
+                time.sleep(15)
         
         prompt = 'Erstelle eine detaillierte Zusammenfassung der Nachrichtensendung in Markdown mit Überschriften und visueller Beschreibung zu jedem Beitrag.'
-        response = client.models.generate_content(model='gemini-2.0-flash', contents=[file_info, prompt])
+        
+        # JETZT NEU: Gemini 3.1 Flash Lite Preview
+        response = client.models.generate_content(model='gemini-3.1-flash-lite-preview', contents=[file_info, prompt])
         
         # 4. Speichern
         date_str = datetime.now().strftime('%Y-%m-%d')
-        # Metadaten bauen (manuelle Verkettung um Backslashes zu vermeiden)
         line1 = '---\ntitle: \"' + video_title + '\"\n'
         line2 = 'date: \"' + date_str + '\"\n'
         line3 = 'videoId: \"' + video_id + '\"\n---\n\n'
@@ -100,7 +98,7 @@ def main():
             f.write(line1 + line2 + line3 + response.text)
         print('DATEI ERFOLGREICH GESPEICHERT!')
 
-        # 5. E-Mail
+        # 5. E-Mail Newsletter via Resend
         resend_api_key = os.environ.get('RESEND_API_KEY')
         email_to = os.environ.get('EMAIL_TO')
         if resend_api_key and email_to:
