@@ -1,140 +1,121 @@
 import os
 import json
-import subprocess
+import urllib.request
 import time
 from datetime import datetime
 from google import genai
 import resend
 import markdown
+import sys
 
-PLAYLIST_URL = "https://www.youtube.com/playlist?list=PL4A2F331EE86DCC22"
-CONTENT_DIR = "content/summaries"
+# Offizielle Tagesschau API für die 20 Uhr Sendung
+API_URL = \"https://www.tagesschau.de/api2u/news/\"
+CONTENT_DIR = \"content/summaries\"
 
 def main():
     os.makedirs(CONTENT_DIR, exist_ok=True)
     
-    # 1. Fetch latest video from playlist (Tarnung als Android-Handy)
-    print("Fetching playlist info...")
-    cmd = [
-        "yt-dlp", 
-        "--extractor-args", "youtube:player_client=android", 
-        "--dump-json", "--playlist-items", "1", PLAYLIST_URL
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print("Error fetching playlist:", result.stderr)
-        return
-        
+    print(\"Suche aktuelle Tagesschau in der ARD-Datenbank...\")
     try:
-        video_info = json.loads(result.stdout)
+        req = urllib.request.Request(API_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode())
+            
+        video_url = None
+        video_title = None
+        video_id = None
+        
+        # Suche nach der 20 Uhr Sendung in den News
+        for item in data.get('news', []):
+            title = item.get('title', '')
+            if 'tagesschau 20:00 Uhr' in title and item.get('type') == 'video':
+                video_title = title
+                # Nimm den MP4 Stream (meistens 'h264m' oder der erste verfügbare)
+                streams = item.get('video', {}).get('streams', {})
+                video_url = streams.get('h264m') or streams.get('h264s') or list(streams.values())[0]
+                video_id = item.get('externalId') or item.get('sophoraId')
+                break
+        
+        if not video_url:
+            print(\"Keine aktuelle 20-Uhr-Sendung in der API gefunden.\")
+            return
+
+        print(f\"Gefunden: {video_title}\")
+        print(f\"Video-URL: {video_url}\")
+        
+        # Dateiname basierend auf Video-ID
+        md_filename = os.path.join(CONTENT_DIR, f\"{video_id}.md\")
+        if os.path.exists(md_filename):
+            print(f\"Video bereits verarbeitet. Überspringe.\")
+            return
+
+        # 2. Download
+        video_file = \"current_video.mp4\"
+        print(\"Lade Video direkt von ARD herunter...\")
+        urllib.request.urlretrieve(video_url, video_file)
+        
     except Exception as e:
-        print("Error parsing json video info:", e)
-        return
+        print(f\"Fehler beim Abrufen der Daten: {e}\")
+        sys.exit(1)
 
-    video_id = video_info.get("id")
-    video_title = video_info.get("title")
-    video_url = video_info.get("webpage_url")
-    
-    if not video_id:
-        print("No video ID found.")
-        return
-        
-    print(f"Latest video: {video_title} ({video_id})")
-    
-    # Check if we already processed it
-    md_filename = os.path.join(CONTENT_DIR, f"{video_id}.md")
-    if os.path.exists(md_filename):
-        print(f"Video {video_id} already processed. Skipping.")
-        return
-        
-    # 2. Download the video in low quality
-    video_file = f"video_{video_id}.mp4"
-    if not os.path.exists(video_file):
-        print("Downloading video in low res...")
-        dl_cmd = [
-            "yt-dlp",
-            "--extractor-args", "youtube:player_client=android",
-            "-f", "worstvideo[ext=mp4]+worstaudio[ext=m4a]/mp4", 
-            "-o", video_file, video_url
-        ]
-        subprocess.run(dl_cmd, check=True)
-    
-    # 3. Process with Gemini
-    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    # 3. Gemini KI Verarbeitung
+    gemini_api_key = os.environ.get(\"GEMINI_API_KEY\")
     if not gemini_api_key:
-        print("No GEMINI_API_KEY found. Exiting.")
-        return
+        print(\"Fehler: Kein GEMINI_API_KEY gefunden.\")
+        sys.exit(1)
 
-    print("Uploading to Gemini...")
+    print(\"Übermittele Video an Google Gemini KI...\")
     try:
         client = genai.Client(api_key=gemini_api_key)
         gfile = client.files.upload(file=video_file)
-    except Exception as e:
-        print("Error uploading to Gemini:", e)
-        return
-    
-    print(f"File uploaded. Waiting for processing... State: {gfile.state.name}")
-    while gfile.state.name == "PROCESSING":
-        time.sleep(10)
-        gfile = client.files.get(name=gfile.name)
-        print(f"State: {gfile.state.name}")
         
-    if gfile.state.name == "FAILED":
-        print("Gemini processing failed.")
-        return
+        while gfile.state.name == \"PROCESSING\":
+            time.sleep(5)
+            gfile = client.files.get(name=gfile.name)
+        
+        if gfile.state.name == \"FAILED\":
+            print(\"KI-Verarbeitung fehlgeschlagen.\")
+            sys.exit(1)
 
-    prompt = """
-    Fasse die folgende Tagesschau-Sendung umfassend zusammen.
-    Erstelle für jeden wichtigen Beitrag eine Überschrift und schreibe eine detaillierte Zusammenfassung.
-    Füge außerdem JEDEM Beitrag eine kurze VISUELLE BESCHREIBUNG hinzu, was in dem Videobeitrag konkret zu sehen war (z.B. "Korrespondent steht vor einem Gebäude...").
-    Antworte in elegantem, gut formatiertem Markdown. Nutze Listen und Hervorhebungen für gute Lesbarkeit.
-    Schreibe ganz ans Ende ein Fazit zu den Kernthemen des Tages in maximal 2-3 Sätzen.
-    """
-    
-    print("Generating summary...")
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=[gfile, prompt]
-    )
-    
-    summary_text = response.text
-    
-    # 4. Save Markdown file
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    frontmatter = f"---\ntitle: \"{video_title}\"\ndate: \"{date_str}\"\nvideoId: \"{video_id}\"\n---\n\n"
-    
-    with open(md_filename, "w", encoding="utf-8") as f:
-        f.write(frontmatter + summary_text)
+        prompt = \"\"\"
+        Fasse die folgende Tagesschau-Sendung umfassend zusammen.
+        Erstelle für jeden wichtigen Beitrag eine Überschrift und eine detaillierte Zusammenfassung.
+        Füge JEDEM Beitrag eine kurze 'VISUELLE BESCHREIBUNG' hinzu (was war im Video zu sehen?).
+        Antworte in elegantem Markdown. Nutze Listen und Fettschrift.
+        Schreibe ganz ans Ende ein Fazit in 2 Sätzen.
+        \"\"\"
         
-    print(f"Saved to {md_filename}")
-    
-    # 5. Send Email via Resend
-    resend_api_key = os.environ.get("RESEND_API_KEY")
-    email_to = os.environ.get("EMAIL_TO")
-    
-    if resend_api_key and email_to:
-        print(f"Sending email to {email_to} via Resend...")
-        resend.api_key = resend_api_key
-        html_content = markdown.markdown(summary_text)
-        try:
-            r = resend.Emails.send({
-                "from": "Tagesschau <onboarding@resend.dev>",
-                "to": [email_to],
-                "subject": f"Neu: {video_title}",
-                "html": f"<h2>{video_title}</h2><br>{html_content}"
+        print(\"KI schreibt Zusammenfassung...\")
+        response = client.models.generate_content(model='gemini-2.0-flash', contents=[gfile, prompt])
+        summary_text = response.text
+        
+        # 4. Speichern
+        date_str = datetime.now().strftime(\"%Y-%m-%d\")
+        frontmatter = f\"---\\ntitle: \\\"{video_title}\\\"\\ndate: \\\"{date_str}\\\"\\nvideoId: \\\"{video_id}\\\"\\n---\\n\\n\"
+        with open(md_filename, \"w\", encoding=\"utf-8\") as f:
+            f.write(frontmatter + summary_text)
+        print(f\"Artikel gespeichert: {md_filename}\")
+
+        # 5. E-Mail via Resend
+        resend_api_key = os.environ.get(\"RESEND_API_KEY\")
+        email_to = os.environ.get(\"EMAIL_TO\")
+        if resend_api_key and email_to:
+            print(\"Sende E-Mail Newsletter...\")
+            resend.api_key = resend_api_key
+            html_content = markdown.markdown(summary_text)
+            resend.Emails.send({
+                \"from\": \"Tagesschau KI <onboarding@resend.dev>\",
+                \"to\": [email_to],
+                \"subject\": f\"Zusammenfassung: {video_title}\",
+                \"html\": f\"<h2>{video_title}</h2>{html_content}\"
             })
-            print("Email sent successfully!")
-        except Exception as e:
-            print("Failed to send email:", e)
-    
-    # Clean up
-    if os.path.exists(video_file):
-        os.remove(video_file)
-        
-    try:
-        client.files.delete(name=gfile.name)
-    except Exception as e:
-        pass
 
-if __name__ == "__main__":
+    finally:
+        # Aufräumen
+        if os.path.exists(video_file):
+            os.remove(video_file)
+        try: client.files.delete(name=gfile.name)
+        except: pass
+
+if __name__ == \"__main__\":
     main()
