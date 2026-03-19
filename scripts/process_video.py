@@ -13,9 +13,13 @@ CONTENT_DIR = "content/summaries"
 def main():
     os.makedirs(CONTENT_DIR, exist_ok=True)
     
-    # 1. Fetch latest video from playlist
+    # 1. Fetch latest video from playlist (Tarnung als Android-Handy)
     print("Fetching playlist info...")
-    cmd = ["yt-dlp", "--dump-json", "--playlist-items", "1", PLAYLIST_URL]
+    cmd = [
+        "yt-dlp", 
+        "--extractor-args", "youtube:player_client=android", 
+        "--dump-json", "--playlist-items", "1", PLAYLIST_URL
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print("Error fetching playlist:", result.stderr)
@@ -47,7 +51,12 @@ def main():
     video_file = f"video_{video_id}.mp4"
     if not os.path.exists(video_file):
         print("Downloading video in low res...")
-        dl_cmd = ["yt-dlp", "-f", "worstvideo[ext=mp4]+worstaudio[ext=m4a]/mp4", "-o", video_file, video_url]
+        dl_cmd = [
+            "yt-dlp",
+            "--extractor-args", "youtube:player_client=android",
+            "-f", "worstvideo[ext=mp4]+worstaudio[ext=m4a]/mp4", 
+            "-o", video_file, video_url
+        ]
         subprocess.run(dl_cmd, check=True)
     
     # 3. Process with Gemini
@@ -57,8 +66,12 @@ def main():
         return
 
     print("Uploading to Gemini...")
-    client = genai.Client(api_key=gemini_api_key)
-    gfile = client.files.upload(file=video_file)
+    try:
+        client = genai.Client(api_key=gemini_api_key)
+        gfile = client.files.upload(file=video_file)
+    except Exception as e:
+        print("Error uploading to Gemini:", e)
+        return
     
     print(f"File uploaded. Waiting for processing... State: {gfile.state.name}")
     while gfile.state.name == "PROCESSING":
@@ -71,11 +84,10 @@ def main():
         return
 
     prompt = """
-    Fasse die folgende Tagesschau-Sendung (20:00 Uhr) umfassend zusammen.
+    Fasse die folgende Tagesschau-Sendung umfassend zusammen.
     Erstelle für jeden wichtigen Beitrag eine Überschrift und schreibe eine detaillierte Zusammenfassung.
     Füge außerdem JEDEM Beitrag eine kurze VISUELLE BESCHREIBUNG hinzu, was in dem Videobeitrag konkret zu sehen war (z.B. "Korrespondent steht vor einem Gebäude...").
     Antworte in elegantem, gut formatiertem Markdown. Nutze Listen und Hervorhebungen für gute Lesbarkeit.
-    Wenn Wetter oder Sport vorkommen, nimm es einfach kurz mit auf.
     Schreibe ganz ans Ende ein Fazit zu den Kernthemen des Tages in maximal 2-3 Sätzen.
     """
     
@@ -114,17 +126,13 @@ def main():
             print("Email sent successfully!")
         except Exception as e:
             print("Failed to send email:", e)
-    else:
-        print("Missing RESEND_API_KEY or EMAIL_TO. Email not sent.")
     
     # Clean up
     if os.path.exists(video_file):
         os.remove(video_file)
         
-    # Optional: Delete file from Gemini storage to save space
     try:
         client.files.delete(name=gfile.name)
-        print("Cleaned up file from Gemini API.")
     except Exception as e:
         pass
 
