@@ -33,4 +33,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add content/summaries/
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Add new Tagesschau summary" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Add new Tagesschau summary" && git push) 
