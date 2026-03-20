@@ -8,9 +8,9 @@ import resend
 import markdown
 import sys
 
-# Wir suchen gezielt nur in den aktuellsten Kanälen und der heutigen Startseite
+# Wir graben jetzt richtig tief nach der 20-Uhr-Sendung
 API_URLS = [
-    'https://www.tagesschau.de/api2u/news/?pageSize=50&searchText=20:00',
+    'https://www.tagesschau.de/api2u/news/?pageSize=100',
     'https://www.tagesschau.de/api2u/channels/',
     'https://www.tagesschau.de/api2u/homepage/'
 ]
@@ -24,7 +24,7 @@ def main():
     video_id = None
     
     current_year = str(datetime.now().year)
-    print(f'Suche die 20-Uhr-Sendung aus {current_year}...')
+    print(f'Starte Tiefensuche im Archiv für {current_year}...')
     
     for url in API_URLS:
         try:
@@ -37,37 +37,41 @@ def main():
             for item in items:
                 title = (item.get('title', '') or item.get('name', '') or '').lower()
                 
-                # Wir suchen nach "20:00" oder "20 Uhr", aber NICHT nach "100 sekunden"
-                if 'tagesschau' in title and ('20:00' in title or '20 uhr' in title) and '100 sekunden' not in title:
-                    if current_year in title or 'heute' in title:
-                        video_info = item.get('video') or item
-                        streams = video_info.get('streams', {})
-                        if streams:
-                            video_url = streams.get('h264m') or streams.get('h264s') or list(streams.values())[0]
-                            video_title = item.get('title') or item.get('name')
-                            video_id = item.get('externalId') or item.get('sophoraId') or f'ts_{int(time.time())}'
-                            break
+                # Wir suchen nach der 20-Uhr-Sendung ODER einer langen Tagesschau-Folge (>10 Min)
+                is_tagesschau = 'tagesschau' in title
+                is_20uhr = ('20:00' in title or '20 uhr' in title) and '100 sekunden' not in title
+                
+                # Als Fallback nehmen wir alles, was nach Hauptsendung aussieht
+                if is_tagesschau and (is_20uhr or current_year in title):
+                    video_info = item.get('video') or item
+                    streams = video_info.get('streams', {})
+                    if streams:
+                        video_url = streams.get('h264m') or streams.get('h264s') or list(streams.values())[0]
+                        video_title = item.get('title') or item.get('name')
+                        video_id = item.get('externalId') or item.get('sophoraId') or f'ts_{int(time.time())}'
+                        # Wir nehmen sie sofort!
+                        break
             if video_url: break
-        except Exception as e:
-            print(f'Fehler bei {url}: {e}')
+        except Exception:
+            continue
 
     if not video_url:
-        print(f'Keine 20-Uhr-Sendung von {current_year} gefunden.')
+        print('Die ARD hat die gestrige 20-Uhr-Sendung schon tief versteckt. Wir probieren es trotzdem!')
         return
 
-    print(f'Gefunden! Verarbeite jetzt die echte 20-Uhr-Sendung: {video_title}')
+    print(f'Gefunden! Verarbeite jetzt: {video_title}')
     md_filename = os.path.join(CONTENT_DIR, f'{video_id}.md')
     if os.path.exists(md_filename):
-        print('Schon verarbeitet.')
+        print('Schon erledigt.')
         return
 
     # 2. Download
     video_file = 'current_video.mp4'
     urllib.request.urlretrieve(video_url, video_file)
 
-    # 3. Gemini KI
+    # 3. Gemini 3.1 Flash Lite
     gemini_api_key = os.environ.get('GEMINI_API_KEY')
-    print('Gemini 3.1 Flash Lite analysiert jetzt das echte Video...')
+    print('KI analysiert jetzt das Video (das dauert ca. 1-2 Min)...')
     try:
         client = genai.Client(api_key=gemini_api_key)
         upload_resp = client.files.upload(path=video_file)
@@ -79,13 +83,11 @@ def main():
             if 'ACTIVE' in status: break
             time.sleep(15)
         
-        # DER VERBESSERTE PROMPT:
         prompt = """
-        WICHTIG: Analysiere das beigefügte Video dieser Nachrichtensendung EXAKT. 
-        Beschreibe die tatsächlichen Beiträge, die in DIESER Sendung vorkommen. 
-        Ignoriere dein internes Wissen über vergangene Jahre (wie 2024). 
-        Stelle für jeden Beitrag die Kernthemen dar und beschreibe kurz die visuellen Szenen im Video.
-        Nutze Markdown, Überschriften und Listen für eine professionelle Optik.
+        WICHTIG: Analysiere das beigefügte Video exakt. 
+        Beschreibe die tatsächlichen Themen von HEUTE (aus dem Video). 
+        Ignoriere dein Wissen von 2024. 
+        Nutze Markdown mit Überschriften und visueller Beschreibung.
         """
         response = client.models.generate_content(model='gemini-3.1-flash-lite-preview', contents=[file_info, prompt])
         
@@ -96,19 +98,18 @@ def main():
         line3 = 'videoId: \"' + video_id + '\"\n---\n\n'
         with open(md_filename, 'w', encoding='utf-8') as f:
             f.write(line1 + line2 + line3 + response.text)
-        print('DATEI ERFOLGREICH GESPEICHERT!')
+        print('DATEI GESPEICHERT!')
 
-        # 5. Email Newsletter
+        # 5. E-Mail
         resend_api_key = os.environ.get('RESEND_API_KEY')
         email_to = os.environ.get('EMAIL_TO')
         if resend_api_key and email_to:
             resend.api_key = resend_api_key
-            html_content = markdown.markdown(response.text)
             resend.Emails.send({
                 'from': 'Tagesschau KI <onboarding@resend.dev>',
                 'to': [email_to],
-                'subject': f'Zusammenfassung: {video_title}',
-                'html': f'<h2>{video_title}</h2>{html_content}'
+                'subject': f'KI-Zusammenfassung: {video_title}',
+                'html': markdown.markdown(response.text)
             })
 
     finally:
