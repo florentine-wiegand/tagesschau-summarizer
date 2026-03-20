@@ -1,5 +1,6 @@
 import { getSortedSummariesData } from '@/lib/api';
 import Link from 'next/link';
+export const dynamic = 'force-dynamic';
 
 export default function Home() {
   const allSummariesData = getSortedSummariesData();
