@@ -8,97 +8,104 @@ import resend
 import markdown
 import sys
 
-# Wir graben jetzt richtig tief nach der 20-Uhr-Sendung
-API_URLS = [
-    'https://www.tagesschau.de/api2u/news/?pageSize=100',
-    'https://www.tagesschau.de/api2u/channels/',
-    'https://www.tagesschau.de/api2u/homepage/'
-]
 CONTENT_DIR = 'content/summaries'
+
+def find_video():
+    # Die /channels/ API listet alle Sendungen mit korrekten Streams
+    url = 'https://www.tagesschau.de/api2u/channels/'
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req) as r:
+        data = json.loads(r.read().decode())
+    
+    channels = data.get('channels', [])
+    print(f'{len(channels)} Eintraege in der Kanalliste gefunden.')
+    
+    best_match = None
+    best_date = None
+    
+    for item in channels:
+        title = (item.get('title', '') or '').lower().strip()
+        date_str = item.get('date', '')
+        streams = item.get('streams', {})
+        
+        # Wir suchen nur nach "tagesschau" (nicht "tagesschau24" und nicht "100 sekunden")
+        is_main = (title == 'tagesschau') and ('100' not in title)
+        
+        # Die Sendung muss einen direkten MP4-Stream haben (kein Livestream)
+        has_mp4 = streams.get('h264m') or streams.get('h264s')
+        
+        if is_main and date_str and has_mp4:
+            print(f'Kandidat: {item.get("title")} vom {date_str}')
+            # Wir nehmen die NEUSTE Sendung (mit dem groessten Datum)
+            if best_date is None or date_str > best_date:
+                best_date = date_str
+                best_match = item
+    
+    return best_match
 
 def main():
     os.makedirs(CONTENT_DIR, exist_ok=True)
     
-    video_url = None
-    video_title = None
-    video_id = None
+    print('Suche nach der aktuellsten Tagesschau-Sendung...')
+    item = find_video()
     
-    current_year = str(datetime.now().year)
-    print(f'Starte Tiefensuche im Archiv für {current_year}...')
-    
-    for url in API_URLS:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
-                data = json.loads(response.read().decode())
-            
-            items = data.get('news', []) + data.get('items', []) + data.get('results', []) + data.get('channels', [])
-            
-            for item in items:
-                title = (item.get('title', '') or item.get('name', '') or '').lower()
-                
-                # Wir suchen nach der 20-Uhr-Sendung ODER einer langen Tagesschau-Folge (>10 Min)
-                is_tagesschau = 'tagesschau' in title
-                is_20uhr = ('20:00' in title or '20 uhr' in title) and '100 sekunden' not in title
-                
-                # Als Fallback nehmen wir alles, was nach Hauptsendung aussieht
-                if is_tagesschau and (is_20uhr or current_year in title):
-                    video_info = item.get('video') or item
-                    streams = video_info.get('streams', {})
-                    if streams:
-                        video_url = streams.get('h264m') or streams.get('h264s') or list(streams.values())[0]
-                        video_title = item.get('title') or item.get('name')
-                        video_id = item.get('externalId') or item.get('sophoraId') or f'ts_{int(time.time())}'
-                        # Wir nehmen sie sofort!
-                        break
-            if video_url: break
-        except Exception:
-            continue
-
-    if not video_url:
-        print('Die ARD hat die gestrige 20-Uhr-Sendung schon tief versteckt. Wir probieren es trotzdem!')
+    if not item:
+        print('Keine passende Sendung in der Kanalliste gefunden.')
         return
-
-    print(f'Gefunden! Verarbeite jetzt: {video_title}')
+    
+    video_title = item.get('title', 'tagesschau')
+    video_id = item.get('sophoraId') or item.get('externalId') or f'ts_{int(time.time())}'
+    date_str = item.get('date', '')
+    streams = item.get('streams', {})
+    video_url = streams.get('h264m') or streams.get('h264s')
+    
+    print(f'Gefunden: {video_title} vom {date_str}')
+    print(f'Stream-URL: {video_url}')
+    
     md_filename = os.path.join(CONTENT_DIR, f'{video_id}.md')
     if os.path.exists(md_filename):
-        print('Schon erledigt.')
+        print('Diese Sendung ist schon verarbeitet.')
         return
 
     # 2. Download
     video_file = 'current_video.mp4'
+    print('Lade Video herunter...')
     urllib.request.urlretrieve(video_url, video_file)
+    print(f'Download fertig! Dateigroesse: {os.path.getsize(video_file)} Bytes')
 
-    # 3. Gemini 3.1 Flash Lite
+    # 3. Gemini KI
     gemini_api_key = os.environ.get('GEMINI_API_KEY')
-    print('KI analysiert jetzt das Video (das dauert ca. 1-2 Min)...')
+    print('Lade Video bei Gemini hoch...')
     try:
         client = genai.Client(api_key=gemini_api_key)
         upload_resp = client.files.upload(path=video_file)
         gfile_name = upload_resp if isinstance(upload_resp, str) else upload_resp.name
+        print(f'Upload fertig. Dateiname: {gfile_name}')
         
+        # Warten auf Verarbeitung
         while True:
             file_info = client.files.get(name=gfile_name)
             status = str(file_info.state).upper()
             if 'ACTIVE' in status: break
+            print(f'Status: {status}... warte.')
             time.sleep(15)
         
-        prompt = """
-        WICHTIG: Analysiere das beigefügte Video exakt. 
-        Beschreibe die tatsächlichen Themen von HEUTE (aus dem Video). 
-        Ignoriere dein Wissen von 2024. 
-        Nutze Markdown mit Überschriften und visueller Beschreibung.
-        """
+        print('KI generiert die Zusammenfassung...')
+        prompt = (
+            'Analysiere dieses Nachrichtenvideo exakt. '
+            'Beschreibe die tatsaechlichen Themen aus dem Video (nicht aus deinem Gedaechtnis). '
+            'Nutze Markdown mit Ueberschriften und visueller Beschreibung.'
+        )
         response = client.models.generate_content(model='gemini-3.1-flash-lite-preview', contents=[file_info, prompt])
         
         # 4. Speichern
-        date_str = datetime.now().strftime('%Y-%m-%d')
+        date_formatted = datetime.now().strftime('%Y-%m-%d')
         line1 = '---\ntitle: \"' + video_title + '\"\n'
-        line2 = 'date: \"' + date_str + '\"\n'
+        line2 = 'date: \"' + date_formatted + '\"\n'
         line3 = 'videoId: \"' + video_id + '\"\n---\n\n'
         with open(md_filename, 'w', encoding='utf-8') as f:
             f.write(line1 + line2 + line3 + response.text)
-        print('DATEI GESPEICHERT!')
+        print('DATEI ERFOLGREICH GESPEICHERT!')
 
         # 5. E-Mail
         resend_api_key = os.environ.get('RESEND_API_KEY')
@@ -108,9 +115,10 @@ def main():
             resend.Emails.send({
                 'from': 'Tagesschau KI <onboarding@resend.dev>',
                 'to': [email_to],
-                'subject': f'KI-Zusammenfassung: {video_title}',
+                'subject': f'KI-Zusammenfassung: {video_title} vom {date_str[:10]}',
                 'html': markdown.markdown(response.text)
             })
+            print('Email versendet!')
 
     finally:
         if os.path.exists(video_file): os.remove(video_file)
